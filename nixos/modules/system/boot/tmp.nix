@@ -62,7 +62,7 @@ in
     systemd.mounts = let
       legacy = builtins.isBool cfg.tmpOnTmpfs;
       tmpOnTmpfs = if legacy then cfg.tmpOnTmpfs else cfg.tmpOnTmpfs.enable;
-      tmpOnTmpfsSize = if legacy = cfg.tmpOnTmpfsSize else cfg.tmpOnTmpfs.size;
+      tmpOnTmpfsSize = if legacy then cfg.tmpOnTmpfsSize else cfg.tmpOnTmpfs.size;
     in mkIf tmpOnTmpfs [
       {
         what = "tmpfs";
