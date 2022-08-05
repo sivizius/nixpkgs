@@ -55,15 +55,15 @@ in
 
   ###### implementation
 
-  config = {
+  config = let
+    legacy = builtins.isBool cfg.tmpOnTmpfs;
+    tmpOnTmpfs = if legacy then cfg.tmpOnTmpfs else cfg.tmpOnTmpfs.enable;
+    tmpOnTmpfsSize = if legacy then cfg.tmpOnTmpfsSize else cfg.tmpOnTmpfs.size;
+  in {
     warnings = optional legacy "Deprecated: boot = { tmpOnTmpfs = …; tmpOnTmpfsSize = …; } should be replaced by boot.tmpOnTmpfs = { enable = …; size = …; }.";
 
     # When changing remember to update /tmp mount in virtualisation/qemu-vm.nix
-    systemd.mounts = let
-      legacy = builtins.isBool cfg.tmpOnTmpfs;
-      tmpOnTmpfs = if legacy then cfg.tmpOnTmpfs else cfg.tmpOnTmpfs.enable;
-      tmpOnTmpfsSize = if legacy then cfg.tmpOnTmpfsSize else cfg.tmpOnTmpfs.size;
-    in mkIf tmpOnTmpfs [
+    systemd.mounts = mkIf tmpOnTmpfs [
       {
         what = "tmpfs";
         where = "/tmp";
