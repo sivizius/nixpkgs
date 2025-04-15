@@ -163,7 +163,10 @@ let
         optionalString (dev.header != null) "--header=${dev.header}"
       }";
       fido2luksCredentials =
-        dev.fido2.credentials ++ optional (dev.fido2.credential != null) dev.fido2.credential;
+        if dev.fido2.credentials != null then
+          dev.fido2.credentials ++ optional (dev.fido2.credential != null) dev.fido2.credential
+        else
+          null;
     in
     ''
       # Wait for luksRoot (and optionally keyFile and/or header) to appear, e.g.
@@ -511,34 +514,94 @@ let
         }
       ''}
 
-      ${optionalString (luks.fido2Support && fido2luksCredentials != [ ]) ''
+      ${lib.traceVal (
+        optionalString (luks.fido2Support && fido2luksCredentials != [ ]) ''
 
-        open_with_hardware() {
-          local passsphrase
-
-            ${
-              if dev.fido2.passwordLess then
-                ''
-                  export passphrase=""
-                ''
-              else
-                ''
-                  read -rsp "FIDO2 salt for ${dev.device}: " passphrase
-                  echo
-                ''
+          ${lib.optionalString (luks.reusePassphrases && dev.fido2.requiresPIN) ''
+            ask_for_fido2_pin() {
+                local pin
+                if [ ! -f /crypt-ramfs/pin ]; then
+                    IFS= read -rsp "Authenticator PIN: " pin
+                    echo
+                    echo -n "$pin" > /crypt-ramfs/pin
+                fi
             }
-            ${optionalString (lib.versionOlder kernelPackages.kernel.version "5.4") ''
-              echo "On systems with Linux Kernel < 5.4, it might take a while to initialize the CRNG, you might want to use linuxPackages_latest."
-              echo "Please move your mouse to create needed randomness."
-            ''}
+
+          ''}
+          ${lib.optionalString (luks.reusePassphrases && !dev.fido2.passwordLess && dev.fido2.salt == null) ''
+            ask_for_fido2_salt() {
+                local salt
+                if [ ! -f /crypt-ramfs/salt ]; then
+                    IFS= read -rsp "Enter FIDO2 Salt (NOT PIN!) for ${dev.device}: " salt
+                    echo
+                    echo -n "$salt" > /crypt-ramfs/salt
+                fi
+            }
+
+          ''}
+          open_with_fido2luks() {
               echo "Waiting for your FIDO2 device..."
-              fido2luks open${optionalString dev.allowDiscards " --allow-discards"} ${dev.device} ${dev.name} "${builtins.concatStringsSep "," fido2luksCredentials}" --await-dev ${toString dev.fido2.gracePeriod} --salt string:$passphrase
-            if [ $? -ne 0 ]; then
-              echo "No FIDO2 key found, falling back to normal open procedure"
-              open_normally
-            fi
-        }
-      ''}
+              ${
+                let
+                  options = lib.cli.toGNUCommandLineShell { } {
+                    allow-discards = dev.allowDiscards;
+
+                    # Await for an authenticator to be connected, timeout after given seconds (default: 15s):
+                    await-dev = dev.fido2.gracePeriod;
+
+                    # "Maximum number of retries (default: 0):
+                    max-retries = dev.fido2.maxRetries;
+
+                    # Request a PIN to unlock the authenticator:
+                    pin = dev.fido2.requiresPIN;
+
+                    # Location to read PIN from:
+                    pin-source = if luks.reusePassphrases && dev.fido2.requiresPIN then "/crypt-ramfs/pin" else null;
+
+                    # Salt for secret generation, defaults to 'ask':
+                    salt =
+                      if dev.fido2.passwordLess then
+                        "string:"
+                      else if dev.fido2.salt != null then
+                        "string:${dev.fido2.salt}"
+                      else if luks.reusePassphrases then
+                        "file:/crypt-ramfs/salt"
+                      else
+                        "ask";
+
+                    # Try to unlock the device using a specific keyslot, ignore all other slots:
+                    inherit (dev.fido2) slot;
+                  };
+
+                  args = lib.escapeShellArgs ([
+                    dev.device
+                    dev.name
+                  ] ++ (
+                    # FIDO credential IDs, separated by ',' generate using fido2luks credential:
+                    lib.optional (fido2luksCredentials != null) (lib.concatStringsSep "," fido2luksCredentials)
+                  ));
+
+                  command = if fido2luksCredentials != null then "open" else "open-token";
+                in
+                "fido2luks ${command} ${options} ${args}"
+              }
+          }
+
+          open_with_hardware() {
+              ${lib.optionalString (luks.reusePassphrases && dev.fido2.requiresPIN) "ask_for_fido2_pin"}
+              ${lib.optionalString (
+                luks.reusePassphrases && !dev.fido2.passwordLess && dev.fido2.salt == null
+              ) "ask_for_fido2_salt"}
+
+              if open_with_fido2luks; then
+                  echo "Unlocked ${dev.device} with FIDO2 key"
+              else
+                  echo "No FIDO2 key found, falling back to normal open procedure"
+                  open_normally
+              fi
+          }
+        ''
+      )}
 
       # commands to run right before we mount our device
       ${dev.preOpenCommands}
@@ -863,17 +926,20 @@ in
                     example = [
                       "f1d00200d8dc783f7fb1e10ace8da27f8312d72692abfca2f7e4960a73f48e82e1f7571f6ebfcee9fb434f9886ccc8fcc52a6614d8d2"
                     ];
-                    type = types.listOf types.str;
+                    type = with types; nullOr (listOf str);
                     description = ''
                       List of FIDO2 credential IDs.
 
                       Use this if you have multiple FIDO2 keys you want to use for the same luks device.
+
+                      If `null`, use `fido2luks open-token`, which expects the credential IDs in the LUKS2 header.
+                      This will only work if the key was added with `fido2luks add-key --token` to add a key .
                     '';
                   };
 
                   gracePeriod = mkOption {
-                    default = 10;
-                    type = types.int;
+                    default = null;
+                    type = types.nullOr types.int;
                     description = "Time in seconds to wait for the FIDO2 key.";
                   };
 
@@ -883,8 +949,44 @@ in
                     description = ''
                       Defines whatever to use an empty string as a default salt.
 
-                      Enable only when your device is PIN protected, such as [Trezor](https://trezor.io/).
+                      Enable only when your device is PIN protected, such as [Trezor](https://trezor.io/) or YubiKeys.
                     '';
+                  };
+
+                  salt = mkOption {
+                    default = null;
+                    type = types.nullOr types.str;
+                    example = "";
+                    description = ''
+                      If set to `null`, you will be asked for the salt to decrypt the partition.
+                      Otherwise, this string is used as FIDO2-salt.
+
+                      Enable only when your device is PIN protected, such as [Trezor](https://trezor.io/) or YubiKeys.
+                    '';
+                  };
+
+                  requiresPIN = mkOption {
+                    default = false;
+                    type = types.bool;
+                    example = true;
+                    description = ''
+                      Whether a PIN is required to unlock the authenticator.
+                    '';
+                  };
+
+                  slot = mkOption {
+                    default = null;
+                    type = types.nullOr types.int;
+                    description = ''
+                      Try to unlock the device using a specific keyslot, ignore all other slots.
+                    '';
+                  };
+
+                  maxRetries = mkOption {
+                    default = null;
+                    type = types.nullOr types.int;
+                    example = 3;
+                    description = "Maximum number of retries.";
                   };
                 };
 
@@ -1075,6 +1177,19 @@ in
           -> versionAtLeast kernelPackages.kernel.version "5.9";
         message = "boot.initrd.luks.devices.<name>.bypassWorkqueues is not supported for kernels older than 5.9";
       }
+
+      (
+        let
+          predicate = { fido2, ... }: fido2.passwordLess && fido2.salt != null;
+          devices = lib.mapAttrsToList (name: cfg: cfg // { inherit name; }) luks.devices;
+          inherit (lib.findFirst predicate { name = null; } devices) name;
+          base = "boot.initrd.luks.devices.${name}.fido";
+        in
+        {
+          assertion = name == null;
+          message = "${base}.passwordLess and ${base}.salt are mutually exclusive";
+        }
+      )
 
       {
         assertion =
