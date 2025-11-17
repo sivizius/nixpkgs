@@ -69,8 +69,8 @@ python3Packages.buildPythonApplication rec {
   src = fetchFromGitHub {
     owner = "systemd";
     repo = "mkosi";
-    rev = "21850673a7f75125d516268ce379dae776dd816a";
-    hash = "sha256-3dhr9lFJpI8aN8HILaMvGuuTbmTVUqdaLAGxSpqciTs=";
+    rev = "c43123398cb8e0941c94fbee1f3dec8f6514e1bf";
+    hash = "sha256-Y4eTDPowaa0IEdHFiU2yWJkMyD5pwvrAhfnRKoi+eMU=";
   };
 
   patches = [
